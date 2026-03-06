@@ -282,6 +282,8 @@ func (c *Connection) handleConfiguration() error {
 			}
 			// Send Registry Data for all synced registries (entry keys only, data from known pack)
 			c.sendRegistryData()
+			// Send Update Tags for all registries
+			c.sendUpdateTags()
 			// Send Finish Configuration
 			c.conn.SendPacket(0x03, func(w *protocol.PacketWriter) {})
 			c.conn.Flush()
@@ -308,6 +310,23 @@ func (c *Connection) sendRegistryData() {
 			}
 		})
 	}
+}
+
+func (c *Connection) sendUpdateTags() {
+	c.conn.SendPacket(0x0d, func(w *protocol.PacketWriter) {
+		w.WriteVarInt(int32(len(world.ConfigurationTags)))
+		for _, reg := range world.ConfigurationTags {
+			w.WriteString(reg.Registry)
+			w.WriteVarInt(int32(len(reg.Tags)))
+			for _, tag := range reg.Tags {
+				w.WriteString(tag.Name)
+				w.WriteVarInt(int32(len(tag.Entries)))
+				for _, id := range tag.Entries {
+					w.WriteVarInt(id)
+				}
+			}
+		}
+	})
 }
 
 // --- Play ---
