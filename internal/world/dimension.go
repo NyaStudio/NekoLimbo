@@ -37,8 +37,8 @@ var dimDefs = []struct {
 	defaultBiome string
 }{
 	{"", "minecraft:overworld", 0, -64, 384, true, "minecraft:plains"},
-	{"DIM-1", "minecraft:the_nether", 2, 0, 256, false, "minecraft:nether_wastes"},
-	{"DIM1", "minecraft:the_end", 3, 0, 256, false, "minecraft:the_end"},
+	{"DIM-1", "minecraft:the_nether", 3, 0, 256, false, "minecraft:nether_wastes"},
+	{"DIM1", "minecraft:the_end", 2, 0, 256, false, "minecraft:the_end"},
 }
 
 var regionFileRe = regexp.MustCompile(`^r\.(-?\d+)\.(-?\d+)\.mca$`)

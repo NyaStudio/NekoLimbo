@@ -198,10 +198,7 @@ func parseBlockStates(bsMap map[string]interface{}) (palette []int32, bits int, 
 		data = dataNBT.([]int64)
 	}
 	if len(palette) > 1 && len(data) > 0 {
-		bits = ceilLog2(len(palette))
-		if bits < 4 {
-			bits = 4
-		}
+		bits = inferBitsPerEntry(len(data), blockEntriesPerSection)
 	}
 	return
 }
@@ -218,10 +215,7 @@ func parseBiomes(bMap map[string]interface{}) (palette []int32, bits int, data [
 		data = dataNBT.([]int64)
 	}
 	if len(palette) > 1 && len(data) > 0 {
-		bits = ceilLog2(len(palette))
-		if bits < 1 {
-			bits = 1
-		}
+		bits = inferBitsPerEntry(len(data), biomeEntriesPerSection)
 	}
 	return
 }
@@ -363,6 +357,19 @@ func ceilLog2(n int) int {
 		n >>= 1
 	}
 	return bits
+}
+
+// inferBitsPerEntry determines the bits-per-entry used in a packed long array
+// by matching the data array length against expected lengths for each bit width.
+func inferBitsPerEntry(dataLen, totalEntries int) int {
+	for bits := 1; bits <= 15; bits++ {
+		entriesPerLong := 64 / bits
+		numLongs := (totalEntries + entriesPerLong - 1) / entriesPerLong
+		if numLongs == dataLen {
+			return bits
+		}
+	}
+	return 4 // fallback
 }
 
 func nbtByte(m map[string]interface{}, key string) byte {
