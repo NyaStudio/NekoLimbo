@@ -14,7 +14,7 @@ func main() {
 	cfg := config.Load("config.yml")
 	log.Printf("Config loaded: %s", cfg.Address())
 
-	w := world.LoadWorld(cfg.World.Path)
+	w := world.LoadWorld(cfg.World.Path, cfg.World.Dimension)
 
 	s := server.New(cfg, w)
 	s.Start()

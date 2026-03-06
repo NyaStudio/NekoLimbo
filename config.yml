@@ -11,6 +11,7 @@ velocity:
 
 world:
   path: "map"
+  dimension: "the_end"  # overworld, the_nether, the_end
 
 player:
   game_mode: 2  # 0=survival, 1=creative, 2=adventure, 3=spectator

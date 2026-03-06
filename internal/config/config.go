@@ -28,7 +28,8 @@ type VelocityConfig struct {
 }
 
 type WorldConfig struct {
-	Path string `yaml:"path"`
+	Path      string `yaml:"path"`
+	Dimension string `yaml:"dimension"`
 }
 
 type PlayerConfig struct {
@@ -65,6 +66,9 @@ func Load(path string) *Config {
 	}
 	if cfg.World.Path == "" {
 		cfg.World.Path = "map"
+	}
+	if cfg.World.Dimension == "" {
+		cfg.World.Dimension = "overworld"
 	}
 	if cfg.Player.ViewDistance == 0 {
 		cfg.Player.ViewDistance = 10

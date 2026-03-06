@@ -43,11 +43,13 @@ var dimDefs = []struct {
 
 var regionFileRe = regexp.MustCompile(`^r\.(-?\d+)\.(-?\d+)\.mca$`)
 
-// LoadWorld loads the world from the given path, auto-detecting available dimensions.
-func LoadWorld(worldPath string) *World {
+// LoadWorld loads the world from the given path, using the specified dimension.
+func LoadWorld(worldPath, dimension string) *World {
 	w := &World{
 		Chunks: make(map[[2]int]*Chunk),
 	}
+
+	dimName := "minecraft:" + dimension
 
 	for _, def := range dimDefs {
 		dimPath := worldPath
@@ -71,14 +73,19 @@ func LoadWorld(worldPath string) *World {
 		}
 		w.Dimensions = append(w.Dimensions, dim)
 		log.Printf("Found dimension: %s (%s)", dim.Name, regionDir)
+
+		if dim.Name == dimName {
+			w.Active = dim
+		}
 	}
 
 	if len(w.Dimensions) == 0 {
 		log.Fatal("No dimensions found in world directory")
 	}
 
-	// Use the first available dimension
-	w.Active = w.Dimensions[0]
+	if w.Active == nil {
+		log.Fatalf("Dimension %q not found in world (available: %v)", dimName, dimensionNames(w.Dimensions))
+	}
 	log.Printf("Active dimension: %s (typeID=%d, sections=%d)", w.Active.Name, w.Active.TypeID, w.Active.Sections)
 
 	// Load chunks for the active dimension
@@ -134,7 +141,14 @@ func LoadWorld(worldPath string) *World {
 	return w
 }
 
-// adjustSectionIndices shifts section Y indices so they start at 0.
+func dimensionNames(dims []*DimensionInfo) []string {
+	names := make([]string, len(dims))
+	for i, d := range dims {
+		names[i] = d.Name
+	}
+	return names
+}
+
 func adjustSectionIndices(nbt map[string]interface{}, minSection int) map[string]interface{} {
 	result := make(map[string]interface{}, len(nbt))
 	for k, v := range nbt {
