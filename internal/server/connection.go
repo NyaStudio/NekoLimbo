@@ -277,11 +277,14 @@ func (c *Connection) handleConfiguration() error {
 		case 0x07: // Known Packs response
 			gotKnownPacks = true
 			packCount, _ := reader.ReadVarInt()
-			if packCount == 0 {
-				log.Printf("[%s] Client has no matching known packs, sending full registry data is not supported", c.username)
+			if packCount > 0 {
+				// Client matched known packs - send entry keys only
+				c.sendRegistryData(false)
+			} else {
+				// Cross-version client - send full NBT data
+				log.Printf("[%s] Client has no matching known packs, sending full registry data", c.username)
+				c.sendRegistryData(true)
 			}
-			// Send Registry Data for all synced registries (entry keys only, data from known pack)
-			c.sendRegistryData()
 			// Send Update Tags for all registries
 			c.sendUpdateTags()
 			// Send Finish Configuration
@@ -299,16 +302,32 @@ func (c *Connection) handleConfiguration() error {
 	}
 }
 
-func (c *Connection) sendRegistryData() {
-	for _, reg := range world.SyncedRegistries {
-		c.conn.SendPacket(0x07, func(w *protocol.PacketWriter) {
-			w.WriteString(reg.ID)
-			w.WriteVarInt(int32(len(reg.Entries)))
-			for _, entry := range reg.Entries {
-				w.WriteString(entry)
-				w.WriteBool(false) // has_data = false (from known pack)
-			}
-		})
+func (c *Connection) sendRegistryData(fullData bool) {
+	if fullData {
+		// Send full NBT data for cross-version clients
+		for _, reg := range world.FullRegistryData {
+			c.conn.SendPacket(0x07, func(w *protocol.PacketWriter) {
+				w.WriteString(reg.ID)
+				w.WriteVarInt(int32(len(reg.Entries)))
+				for _, entry := range reg.Entries {
+					w.WriteString(entry.Name)
+					w.WriteBool(true) // has_data = true
+					w.WriteBytes(entry.Data)
+				}
+			})
+		}
+	} else {
+		// Send entry keys only (data from known pack)
+		for _, reg := range world.SyncedRegistries {
+			c.conn.SendPacket(0x07, func(w *protocol.PacketWriter) {
+				w.WriteString(reg.ID)
+				w.WriteVarInt(int32(len(reg.Entries)))
+				for _, entry := range reg.Entries {
+					w.WriteString(entry)
+					w.WriteBool(false) // has_data = false
+				}
+			})
+		}
 	}
 }
 
