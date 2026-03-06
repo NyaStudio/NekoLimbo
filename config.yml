@@ -1,0 +1,22 @@
+# NekoLimbo Configuration
+server:
+  host: "0.0.0.0"
+  port: 25565
+  max_players: 20
+  motd: "A NekoLimbo Server"
+
+velocity:
+  enabled: false
+  secret: ""
+
+world:
+  path: "map"
+
+player:
+  game_mode: 3  # 0=survival, 1=creative, 2=adventure, 3=spectator
+  view_distance: 10
+  spawn_x: 0.5
+  spawn_y: 100.0
+  spawn_z: 0.5
+  spawn_yaw: 0.0
+  spawn_pitch: 0.0

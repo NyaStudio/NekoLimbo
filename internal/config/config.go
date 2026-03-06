@@ -1,0 +1,76 @@
+package config
+
+import (
+	"fmt"
+	"log"
+	"os"
+
+	"gopkg.in/yaml.v3"
+)
+
+type Config struct {
+	Server   ServerConfig   `yaml:"server"`
+	Velocity VelocityConfig `yaml:"velocity"`
+	World    WorldConfig    `yaml:"world"`
+	Player   PlayerConfig   `yaml:"player"`
+}
+
+type ServerConfig struct {
+	Host       string `yaml:"host"`
+	Port       int    `yaml:"port"`
+	MaxPlayers int    `yaml:"max_players"`
+	MOTD       string `yaml:"motd"`
+}
+
+type VelocityConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Secret  string `yaml:"secret"`
+}
+
+type WorldConfig struct {
+	Path string `yaml:"path"`
+}
+
+type PlayerConfig struct {
+	GameMode     int     `yaml:"game_mode"`
+	ViewDistance int     `yaml:"view_distance"`
+	SpawnX       float64 `yaml:"spawn_x"`
+	SpawnY       float64 `yaml:"spawn_y"`
+	SpawnZ       float64 `yaml:"spawn_z"`
+	SpawnYaw     float32 `yaml:"spawn_yaw"`
+	SpawnPitch   float32 `yaml:"spawn_pitch"`
+}
+
+func (c *Config) Address() string {
+	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
+}
+
+func Load(path string) *Config {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatalf("Failed to read config: %v", err)
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		log.Fatalf("Failed to parse config: %v", err)
+	}
+	if cfg.Server.Port == 0 {
+		cfg.Server.Port = 25565
+	}
+	if cfg.Server.MaxPlayers == 0 {
+		cfg.Server.MaxPlayers = 20
+	}
+	if cfg.Server.MOTD == "" {
+		cfg.Server.MOTD = "A NekoLimbo Server"
+	}
+	if cfg.World.Path == "" {
+		cfg.World.Path = "map"
+	}
+	if cfg.Player.ViewDistance == 0 {
+		cfg.Player.ViewDistance = 10
+	}
+	if cfg.Player.SpawnY == 0 {
+		cfg.Player.SpawnY = 100
+	}
+	return &cfg
+}
