@@ -439,7 +439,7 @@ func (c *Connection) handlePlay() {
 		pw.WriteBool(false) // has death location
 		pw.WriteVarInt(0)   // portal cooldown
 		pw.WriteVarInt(63)  // sea level
-		pw.WriteBool(false) // enforces secure chat
+		pw.WriteBool(true)  // enforces secure chat (suppresses "can't verify" toast)
 	})
 
 	// Player Abilities (0x3a)
