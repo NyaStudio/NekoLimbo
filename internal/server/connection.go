@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"nekolimbo/internal/protocol"
@@ -495,6 +497,43 @@ func (c *Connection) handlePlay() {
 	// Send chunks in a batch
 	c.sendChunks(w, cfg.Player.ViewDistance, centerChunkX, centerChunkZ)
 
+	// Player Info Update (0x40) — add self to tab list
+	c.conn.SendPacket(0x40, func(pw *protocol.PacketWriter) {
+		pw.WriteUint8(0x01 | 0x04 | 0x08 | 0x10) // actions: add_player, update_game_mode, update_listed, update_latency
+		pw.WriteVarInt(1)                        // 1 entry
+		pw.WriteUUID(c.uuid)
+		pw.WriteString(c.username)
+		pw.WriteVarInt(int32(len(c.properties)))
+		for _, prop := range c.properties {
+			pw.WriteString(prop.Name)
+			pw.WriteString(prop.Value)
+			pw.WriteBool(prop.HasSig)
+			if prop.HasSig {
+				pw.WriteString(prop.Signature)
+			}
+		}
+		pw.WriteVarInt(int32(cfg.Player.GameMode))
+		pw.WriteBool(true)
+		pw.WriteVarInt(0)
+	})
+
+	// Tab List Header/Footer (0x74)
+	c.conn.SendPacket(0x74, func(pw *protocol.PacketWriter) {
+		writeTextComponentNBT(pw, cfg.Limbo.TabHeader)
+		writeTextComponentNBT(pw, cfg.Limbo.TabFooter)
+	})
+
+	// System Chat — join message (0x73)
+	if cfg.Limbo.JoinMessage != "" {
+		msg := strings.ReplaceAll(cfg.Limbo.JoinMessage, "{player}", c.username)
+		c.conn.SendPacket(0x73, func(pw *protocol.PacketWriter) {
+			writeTextComponentNBT(pw, msg)
+			pw.WriteBool(false) // not action bar
+		})
+	}
+
+	c.conn.Flush()
+
 	log.Printf("[%s] %s entered play state (%d chunks sent)", c.conn.RemoteAddr(), c.username, len(w.Chunks))
 
 	// Keep alive loop
@@ -541,16 +580,33 @@ func (c *Connection) sendChunks(w *world.World, viewDistance int, centerX, cente
 }
 
 func (c *Connection) keepAliveLoop() {
+	cfg := c.server.Config
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
+	needTeleport := make(chan struct{}, 1)
 	done := make(chan struct{})
+	var teleportID int32
+
 	go func() {
 		defer close(done)
 		for {
-			_, _, err := c.conn.ReadPacket()
+			id, reader, err := c.conn.ReadPacket()
 			if err != nil {
 				return
+			}
+			if cfg.Limbo.VoidTPY != 0 {
+				switch id {
+				case 0x1c, 0x1d: // Set Player Position / Set Player Position and Rotation
+					reader.ReadFloat64() // x
+					y, _ := reader.ReadFloat64()
+					if y < cfg.Limbo.VoidTPY {
+						select {
+						case needTeleport <- struct{}{}:
+						default:
+						}
+					}
+				}
 			}
 		}
 	}()
@@ -567,6 +623,27 @@ func (c *Connection) keepAliveLoop() {
 				return
 			}
 			c.conn.Flush()
+		case <-needTeleport:
+			teleportID++
+			c.conn.SendPacket(0x42, func(pw *protocol.PacketWriter) {
+				pw.WriteVarInt(teleportID)
+				pw.WriteFloat64(cfg.Player.SpawnX)
+				pw.WriteFloat64(cfg.Player.SpawnY)
+				pw.WriteFloat64(cfg.Player.SpawnZ)
+				pw.WriteFloat64(0) // delta X
+				pw.WriteFloat64(0) // delta Y
+				pw.WriteFloat64(0) // delta Z
+				pw.WriteFloat32(cfg.Player.SpawnYaw)
+				pw.WriteFloat32(cfg.Player.SpawnPitch)
+				pw.WriteInt32(0) // flags (all absolute)
+			})
+			if cfg.Limbo.VoidMessage != "" {
+				c.conn.SendPacket(0x73, func(pw *protocol.PacketWriter) {
+					writeTextComponentNBT(pw, cfg.Limbo.VoidMessage)
+					pw.WriteBool(false)
+				})
+			}
+			c.conn.Flush()
 		case <-done:
 			return
 		}
@@ -576,4 +653,16 @@ func (c *Connection) keepAliveLoop() {
 func uuidToString(uuid [16]byte) string {
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16])
+}
+
+// writeTextComponentNBT writes a text component as anonymous NBT to the packet.
+// Empty string writes TAG_End (null). Otherwise writes {"text":"..."}.
+func writeTextComponentNBT(pw *protocol.PacketWriter, text string) {
+	if text == "" {
+		pw.WriteUint8(world.TagEnd)
+		return
+	}
+	var buf bytes.Buffer
+	world.WriteAnonymousNBT(&buf, map[string]interface{}{"text": text})
+	pw.WriteBytes(buf.Bytes())
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -13,6 +14,7 @@ type Config struct {
 	Velocity VelocityConfig `yaml:"velocity"`
 	World    WorldConfig    `yaml:"world"`
 	Player   PlayerConfig   `yaml:"player"`
+	Limbo    LimboConfig    `yaml:"limbo"`
 }
 
 type ServerConfig struct {
@@ -40,6 +42,14 @@ type PlayerConfig struct {
 	SpawnZ       float64 `yaml:"spawn_z"`
 	SpawnYaw     float32 `yaml:"spawn_yaw"`
 	SpawnPitch   float32 `yaml:"spawn_pitch"`
+}
+
+type LimboConfig struct {
+	TabHeader   string  `yaml:"tab_header"`
+	TabFooter   string  `yaml:"tab_footer"`
+	JoinMessage string  `yaml:"join_message"`
+	VoidMessage string  `yaml:"void_message"`
+	VoidTPY     float64 `yaml:"void_tp_y"`
 }
 
 func (c *Config) Address() string {
@@ -76,5 +86,29 @@ func Load(path string) *Config {
 	if cfg.Player.SpawnY == 0 {
 		cfg.Player.SpawnY = 100
 	}
+	if cfg.Limbo.VoidTPY == 0 {
+		cfg.Limbo.VoidTPY = -100
+	}
+	cfg.Limbo.TabHeader = translateColorCodes(cfg.Limbo.TabHeader)
+	cfg.Limbo.TabFooter = translateColorCodes(cfg.Limbo.TabFooter)
+	cfg.Limbo.JoinMessage = translateColorCodes(cfg.Limbo.JoinMessage)
+	cfg.Limbo.VoidMessage = translateColorCodes(cfg.Limbo.VoidMessage)
 	return &cfg
+}
+
+// translateColorCodes replaces &X color codes with §X (Minecraft formatting).
+func translateColorCodes(s string) string {
+	const codes = "0123456789abcdefklmnorABCDEFKLMNOR"
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '&' && i+1 < len(s) && strings.ContainsRune(codes, rune(s[i+1])) {
+			b.WriteString("§")
+			i++
+			b.WriteByte(s[i])
+		} else {
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
 }
