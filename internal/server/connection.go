@@ -508,10 +508,12 @@ func (c *Connection) sendChunks(w *world.World, viewDistance int, centerX, cente
 	c.conn.SendPacket(0x0d, func(pw *protocol.PacketWriter) {})
 
 	count := 0
+	var blockEntities []world.BlockEntityUpdate
 	for z := centerZ - viewDistance; z <= centerZ+viewDistance; z++ {
 		for x := centerX - viewDistance; x <= centerX+viewDistance; x++ {
 			if chunk, ok := w.Chunks[[2]int{x, z}]; ok {
 				c.conn.WritePacket(0x28, chunk.PacketData)
+				blockEntities = append(blockEntities, chunk.BlockEntities...)
 			} else {
 				emptyChunk := world.BuildChunkPacketData(x, z, map[string]interface{}{}, w.Active.Sections, w.Active.DefaultBiome, w.Active.HasSkyLight)
 				c.conn.WritePacket(0x28, emptyChunk)
@@ -524,6 +526,17 @@ func (c *Connection) sendChunks(w *world.World, viewDistance int, centerX, cente
 	c.conn.SendPacket(0x0c, func(pw *protocol.PacketWriter) {
 		pw.WriteVarInt(int32(count))
 	})
+	for _, blockEntity := range blockEntities {
+		c.conn.SendPacket(0x07, func(pw *protocol.PacketWriter) {
+			pw.WritePosition(blockEntity.X, blockEntity.Y, blockEntity.Z)
+			pw.WriteVarInt(blockEntity.TypeID)
+			if len(blockEntity.NBT) == 0 {
+				pw.WriteUint8(world.TagEnd)
+				return
+			}
+			pw.WriteBytes(blockEntity.NBT)
+		})
+	}
 	c.conn.Flush()
 }
 

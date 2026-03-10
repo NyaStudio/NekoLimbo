@@ -2,6 +2,8 @@ package world
 
 import (
 	"bytes"
+	"encoding/json"
+	"strings"
 
 	"nekolimbo/internal/protocol"
 )
@@ -19,8 +21,15 @@ const (
 
 // Chunk holds pre-serialized packet data for a single chunk column.
 type Chunk struct {
-	X, Z       int
-	PacketData []byte
+	X, Z          int
+	PacketData    []byte
+	BlockEntities []BlockEntityUpdate
+}
+
+type BlockEntityUpdate struct {
+	X, Y, Z int
+	TypeID  int32
+	NBT     []byte
 }
 
 // GetBlockStateID returns the global block state ID for a given block name and properties.
@@ -206,8 +215,10 @@ type chunkLightData struct {
 }
 
 type chunkBlockEntity struct {
+	x        int
 	packedXZ byte
 	y        int16
+	z        int
 	typeID   int32
 	nbt      []byte
 }
@@ -347,8 +358,10 @@ func collectBlockEntities(nbt map[string]interface{}, chunkX, chunkZ int) []chun
 		}
 
 		entities = append(entities, chunkBlockEntity{
+			x:        x,
 			packedXZ: byte(((localX & 0x0F) << 4) | (localZ & 0x0F)),
 			y:        int16(y),
+			z:        z,
 			typeID:   typeID,
 			nbt:      encodeBlockEntityNBT(entity),
 		})
@@ -357,7 +370,25 @@ func collectBlockEntities(nbt map[string]interface{}, chunkX, chunkZ int) []chun
 	return entities
 }
 
+func buildBlockEntityUpdates(entities []chunkBlockEntity) []BlockEntityUpdate {
+	if len(entities) == 0 {
+		return nil
+	}
+	updates := make([]BlockEntityUpdate, 0, len(entities))
+	for _, entity := range entities {
+		updates = append(updates, BlockEntityUpdate{
+			X:      entity.x,
+			Y:      int(entity.y),
+			Z:      entity.z,
+			TypeID: entity.typeID,
+			NBT:    entity.nbt,
+		})
+	}
+	return updates
+}
+
 func encodeBlockEntityNBT(entity map[string]interface{}) []byte {
+	id, _ := entity["id"].(string)
 	data := make(map[string]interface{}, len(entity))
 	for k, v := range entity {
 		switch k {
@@ -367,12 +398,236 @@ func encodeBlockEntityNBT(entity map[string]interface{}) []byte {
 			data[k] = v
 		}
 	}
+	normalizeBlockEntityData(id, data)
+	return writeAnonymousNBTBytes(data)
+}
 
+func writeAnonymousNBTBytes(data map[string]interface{}) []byte {
 	var buf bytes.Buffer
 	if err := WriteAnonymousNBT(&buf, data); err != nil {
 		return []byte{TagEnd}
 	}
 	return buf.Bytes()
+}
+
+func normalizeBlockEntityData(id string, data map[string]interface{}) {
+	switch id {
+	case "minecraft:sign", "minecraft:hanging_sign", "sign", "hanging_sign":
+		normalizeSignBlockEntityData(data)
+	}
+}
+
+func normalizeSignBlockEntityData(data map[string]interface{}) {
+	data["is_waxed"] = normalizeNBTByte(data["is_waxed"])
+
+	// Handle pre-1.20 sign format: Text1-Text4 → front_text/back_text
+	if _, hasFront := data["front_text"]; !hasFront {
+		if _, hasText1 := data["Text1"]; hasText1 {
+			data["front_text"] = map[string]interface{}{
+				"color":            normalizeSignTextColor(data["Color"]),
+				"has_glowing_text": normalizeNBTByte(data["GlowingText"]),
+				"messages": NBTList{ElementType: TagString, Values: []interface{}{
+					oldSignField(data["Text1"]),
+					oldSignField(data["Text2"]),
+					oldSignField(data["Text3"]),
+					oldSignField(data["Text4"]),
+				}},
+			}
+			data["back_text"] = emptySignSide()
+			delete(data, "Text1")
+			delete(data, "Text2")
+			delete(data, "Text3")
+			delete(data, "Text4")
+			delete(data, "Color")
+			delete(data, "GlowingText")
+		}
+	}
+
+	data["front_text"] = normalizeSignTextSide(data["front_text"])
+	data["back_text"] = normalizeSignTextSide(data["back_text"])
+}
+
+func oldSignField(raw interface{}) string {
+	if s, ok := raw.(string); ok {
+		s = strings.TrimSpace(s)
+		if s != "" && s != `""` && json.Valid([]byte(s)) {
+			return s
+		}
+	}
+	return `{"text":""}`
+}
+
+func emptySignSide() map[string]interface{} {
+	return map[string]interface{}{
+		"color":            "black",
+		"has_glowing_text": byte(0),
+		"messages":         newEmptySignTextList(),
+	}
+}
+
+func normalizeSignTextSide(raw interface{}) map[string]interface{} {
+	side, ok := raw.(map[string]interface{})
+	if !ok {
+		side = make(map[string]interface{})
+	}
+
+	messages := normalizeSignTextMessages(side["messages"])
+	filtered := normalizeSignTextMessages(side["filtered_messages"])
+	if isEmptySignTextList(filtered) {
+		filtered = cloneSignTextList(messages)
+	}
+
+	side["color"] = normalizeSignTextColor(side["color"])
+	side["has_glowing_text"] = normalizeNBTByte(side["has_glowing_text"])
+	side["messages"] = messages
+	side["filtered_messages"] = filtered
+	return side
+}
+
+// normalizeSignTextMessages ensures exactly 4 JSON text component strings.
+// Block entity NBT sends sign messages as TAG_List(TAG_String) where each
+// string is a JSON-encoded text component (e.g. '{"text":"Hello"}').
+func normalizeSignTextMessages(raw interface{}) NBTList {
+	list, ok := raw.(NBTList)
+	if !ok {
+		return newEmptySignTextList()
+	}
+
+	values := make([]interface{}, 4)
+	for i := range values {
+		values[i] = `{"text":""}`
+		if i < len(list.Values) {
+			values[i] = normalizeSignMessage(list.Values[i])
+		}
+	}
+	return NBTList{ElementType: TagString, Values: values}
+}
+
+func newEmptySignTextList() NBTList {
+	return NBTList{ElementType: TagString, Values: []interface{}{
+		`{"text":""}`, `{"text":""}`, `{"text":""}`, `{"text":""}`,
+	}}
+}
+
+// normalizeSignMessage converts a single sign message (from either old-format
+// TAG_String with JSON or new-format TAG_Compound) into a JSON string.
+func normalizeSignMessage(raw interface{}) string {
+	switch v := raw.(type) {
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" || trimmed == `""` {
+			return `{"text":""}`
+		}
+		if json.Valid([]byte(trimmed)) {
+			return trimmed
+		}
+		// Plain text (1.20.3+ simple string format), wrap in JSON
+		b, _ := json.Marshal(map[string]string{"text": trimmed})
+		return string(b)
+	case map[string]interface{}:
+		return textComponentToJSON(v)
+	default:
+		return `{"text":""}`
+	}
+}
+
+// textComponentToJSON serializes an NBT text component compound to JSON.
+func textComponentToJSON(component map[string]interface{}) string {
+	b, err := json.Marshal(toJSONValue(component))
+	if err != nil {
+		return `{"text":""}`
+	}
+	return string(b)
+}
+
+// toJSONValue converts NBT-typed values to JSON-compatible Go values.
+func toJSONValue(v interface{}) interface{} {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		m := make(map[string]interface{}, len(val))
+		for k, v := range val {
+			m[k] = toJSONValue(v)
+		}
+		return m
+	case NBTList:
+		arr := make([]interface{}, len(val.Values))
+		for i, elem := range val.Values {
+			arr[i] = toJSONValue(elem)
+		}
+		return arr
+	case []interface{}:
+		arr := make([]interface{}, len(val))
+		for i, elem := range val {
+			arr[i] = toJSONValue(elem)
+		}
+		return arr
+	case byte:
+		if val == 0 {
+			return false
+		}
+		if val == 1 {
+			return true
+		}
+		return int(val)
+	case int8:
+		return int(val)
+	case int16:
+		return int(val)
+	case int32:
+		return int(val)
+	default:
+		return val
+	}
+}
+
+func isEmptySignTextList(list NBTList) bool {
+	if len(list.Values) == 0 {
+		return true
+	}
+	for _, raw := range list.Values {
+		s, ok := raw.(string)
+		if !ok {
+			return false
+		}
+		trimmed := strings.TrimSpace(s)
+		if trimmed != "" && trimmed != `""` && trimmed != `{"text":""}` {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneSignTextList(list NBTList) NBTList {
+	values := make([]interface{}, len(list.Values))
+	copy(values, list.Values)
+	return NBTList{ElementType: list.ElementType, Values: values}
+}
+
+func normalizeSignTextColor(raw interface{}) string {
+	if color, ok := raw.(string); ok && color != "" {
+		return color
+	}
+	return "black"
+}
+
+func normalizeNBTByte(raw interface{}) byte {
+	switch value := raw.(type) {
+	case byte:
+		return value
+	case int8:
+		return byte(value)
+	case int:
+		return byte(value)
+	case int16:
+		return byte(value)
+	case int32:
+		return byte(value)
+	case bool:
+		if value {
+			return 1
+		}
+	}
+	return 0
 }
 
 func nbtByteArray(m map[string]interface{}, keys ...string) []byte {

@@ -238,6 +238,13 @@ func writeNBTPayload(w io.Writer, tagType byte, value interface{}) error {
 		case int8:
 			_, err := w.Write([]byte{byte(v)})
 			return err
+		case bool:
+			if v {
+				_, err := w.Write([]byte{1})
+				return err
+			}
+			_, err := w.Write([]byte{0})
+			return err
 		}
 		return io.ErrUnexpectedEOF
 	case TagShort:
@@ -340,6 +347,8 @@ func writeNBTPayload(w io.Writer, tagType byte, value interface{}) error {
 func nbtTagType(v interface{}) byte {
 	switch v.(type) {
 	case byte:
+		return TagByte
+	case bool:
 		return TagByte
 	case int16:
 		return TagShort

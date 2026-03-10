@@ -126,10 +126,12 @@ func LoadWorld(worldPath, dimension string) *World {
 				adjustedNBT = adjustSectionIndices(nbt, minSection)
 			}
 
+			blockEntities := collectBlockEntities(adjustedNBT, pos[0], pos[1])
 			chunk := &Chunk{
-				X:          pos[0],
-				Z:          pos[1],
-				PacketData: BuildChunkPacketData(pos[0], pos[1], adjustedNBT, w.Active.Sections, w.Active.DefaultBiome, w.Active.HasSkyLight),
+				X:             pos[0],
+				Z:             pos[1],
+				PacketData:    BuildChunkPacketData(pos[0], pos[1], adjustedNBT, w.Active.Sections, w.Active.DefaultBiome, w.Active.HasSkyLight),
+				BlockEntities: buildBlockEntityUpdates(blockEntities),
 			}
 			w.Chunks[pos] = chunk
 		}
