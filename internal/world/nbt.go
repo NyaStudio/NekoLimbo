@@ -230,6 +230,92 @@ func writeNBTString(w io.Writer, s string) error {
 
 func writeNBTPayload(w io.Writer, tagType byte, value interface{}) error {
 	switch tagType {
+	case TagByte:
+		switch v := value.(type) {
+		case byte:
+			_, err := w.Write([]byte{v})
+			return err
+		case int8:
+			_, err := w.Write([]byte{byte(v)})
+			return err
+		}
+		return io.ErrUnexpectedEOF
+	case TagShort:
+		b := make([]byte, 2)
+		binary.BigEndian.PutUint16(b, uint16(value.(int16)))
+		_, err := w.Write(b)
+		return err
+	case TagInt:
+		var iv int32
+		switch v := value.(type) {
+		case int32:
+			iv = v
+		case int:
+			iv = int32(v)
+		default:
+			return io.ErrUnexpectedEOF
+		}
+		b := make([]byte, 4)
+		binary.BigEndian.PutUint32(b, uint32(iv))
+		_, err := w.Write(b)
+		return err
+	case TagLong:
+		b := make([]byte, 8)
+		binary.BigEndian.PutUint64(b, uint64(value.(int64)))
+		_, err := w.Write(b)
+		return err
+	case TagFloat:
+		b := make([]byte, 4)
+		binary.BigEndian.PutUint32(b, math.Float32bits(value.(float32)))
+		_, err := w.Write(b)
+		return err
+	case TagDouble:
+		b := make([]byte, 8)
+		binary.BigEndian.PutUint64(b, math.Float64bits(value.(float64)))
+		_, err := w.Write(b)
+		return err
+	case TagByteArray:
+		arr := value.([]byte)
+		b := make([]byte, 4)
+		binary.BigEndian.PutUint32(b, uint32(len(arr)))
+		if _, err := w.Write(b); err != nil {
+			return err
+		}
+		_, err := w.Write(arr)
+		return err
+	case TagString:
+		return writeNBTString(w, value.(string))
+	case TagList:
+		list := value.(NBTList)
+		if _, err := w.Write([]byte{list.ElementType}); err != nil {
+			return err
+		}
+		b := make([]byte, 4)
+		binary.BigEndian.PutUint32(b, uint32(len(list.Values)))
+		if _, err := w.Write(b); err != nil {
+			return err
+		}
+		for _, elem := range list.Values {
+			if err := writeNBTPayload(w, list.ElementType, elem); err != nil {
+				return err
+			}
+		}
+		return nil
+	case TagIntArray:
+		arr := value.([]int32)
+		b := make([]byte, 4)
+		binary.BigEndian.PutUint32(b, uint32(len(arr)))
+		if _, err := w.Write(b); err != nil {
+			return err
+		}
+		for _, v := range arr {
+			b := make([]byte, 4)
+			binary.BigEndian.PutUint32(b, uint32(v))
+			if _, err := w.Write(b); err != nil {
+				return err
+			}
+		}
+		return nil
 	case TagLongArray:
 		arr := value.([]int64)
 		b := make([]byte, 4)
@@ -244,6 +330,7 @@ func writeNBTPayload(w io.Writer, tagType byte, value interface{}) error {
 				return err
 			}
 		}
+		return nil
 	case TagCompound:
 		return writeNBTCompound(w, value.(map[string]interface{}))
 	}
@@ -266,6 +353,8 @@ func nbtTagType(v interface{}) byte {
 		return TagDouble
 	case string:
 		return TagString
+	case int:
+		return TagInt
 	case []byte:
 		return TagByteArray
 	case []int32:

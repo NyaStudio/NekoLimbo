@@ -30,20 +30,25 @@ func GetBlockStateID(name string, properties map[string]string) int32 {
 		return 0 // air
 	}
 	if len(def.Properties) == 0 {
-		return int32(def.MinStateID)
+		return int32(def.DefaultState)
 	}
+	defaultOffset := def.DefaultState - def.MinStateID
 	offset := 0
 	for i, prop := range def.Properties {
 		stride := 1
 		for j := i + 1; j < len(def.Properties); j++ {
 			stride *= len(def.Properties[j].Values)
 		}
-		valueStr := properties[prop.Name]
-		valueIdx := 0
-		for k, v := range prop.Values {
-			if v == valueStr {
-				valueIdx = k
-				break
+
+		valueIdx := (defaultOffset / stride) % len(prop.Values)
+		if properties != nil {
+			if valueStr, ok := properties[prop.Name]; ok {
+				for k, v := range prop.Values {
+					if v == valueStr {
+						valueIdx = k
+						break
+					}
+				}
 			}
 		}
 		offset += valueIdx * stride
@@ -60,7 +65,7 @@ func GetBiomeID(name string) int32 {
 }
 
 // BuildChunkPacketData constructs the complete data for a map_chunk packet.
-func BuildChunkPacketData(chunkX, chunkZ int, nbt map[string]interface{}, numSections int, defaultBiome int32) []byte {
+func BuildChunkPacketData(chunkX, chunkZ int, nbt map[string]interface{}, numSections int, defaultBiome int32, hasSkyLight bool) []byte {
 	w := protocol.NewPacketWriter()
 	w.WriteInt32(int32(chunkX))
 	w.WriteInt32(int32(chunkZ))
@@ -71,21 +76,22 @@ func BuildChunkPacketData(chunkX, chunkZ int, nbt map[string]interface{}, numSec
 	WriteAnonymousNBT(&hbuf, heightmapNBT)
 	w.WriteBytes(hbuf.Bytes())
 
+	sectionMap := buildSectionMap(nbt)
+
 	// Build section data
-	sectionData := buildSectionData(nbt, numSections, defaultBiome)
+	sectionData := buildSectionData(sectionMap, numSections, defaultBiome)
 	w.WriteVarInt(int32(len(sectionData)))
 	w.WriteBytes(sectionData)
 
-	// Block entities (empty)
-	w.WriteVarInt(0)
+	writeBlockEntities(w, nbt, chunkX, chunkZ)
 
-	// Light masks (all empty)
-	w.WriteVarInt(0) // sky light mask
-	w.WriteVarInt(0) // block light mask
-	w.WriteVarInt(0) // empty sky light mask
-	w.WriteVarInt(0) // empty block light mask
-	w.WriteVarInt(0) // sky light arrays
-	w.WriteVarInt(0) // block light arrays
+	light := buildLightData(sectionMap, numSections, hasSkyLight)
+	writeBitSet(w, light.skyLightMask)
+	writeBitSet(w, light.blockLightMask)
+	writeBitSet(w, light.emptySkyLightMask)
+	writeBitSet(w, light.emptyBlockLightMask)
+	writeLightArrays(w, light.skyLightArrays)
+	writeLightArrays(w, light.blockLightArrays)
 
 	return w.Bytes()
 }
@@ -109,18 +115,24 @@ func extractHeightmaps(nbt map[string]interface{}) map[string]interface{} {
 	return result
 }
 
-func buildSectionData(nbt map[string]interface{}, numSections int, defaultBiome int32) []byte {
-	// Parse sections from NBT
+func buildSectionMap(nbt map[string]interface{}) map[int]map[string]interface{} {
 	sectionMap := make(map[int]map[string]interface{})
 	if sectionsNBT, ok := nbt["sections"]; ok {
-		list := sectionsNBT.(NBTList)
-		for _, v := range list.Values {
-			section := v.(map[string]interface{})
-			y := nbtByte(section, "Y")
-			sectionMap[int(int8(y))] = section
+		if list, ok := sectionsNBT.(NBTList); ok {
+			for _, v := range list.Values {
+				section, ok := v.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				y := nbtByte(section, "Y")
+				sectionMap[int(int8(y))] = section
+			}
 		}
 	}
+	return sectionMap
+}
 
+func buildSectionData(sectionMap map[int]map[string]interface{}, numSections int, defaultBiome int32) []byte {
 	w := protocol.NewPacketWriter()
 	for i := 0; i < numSections; i++ {
 		section, ok := sectionMap[i]
@@ -157,6 +169,14 @@ func writeSection(w *protocol.PacketWriter, section map[string]interface{}, defa
 	}
 
 	blockCount := computeBlockCount(blockPalette, blockData, blockFileBits)
+	if blockCount == 0 && len(blockPalette) > 1 {
+		for _, id := range blockPalette {
+			if id != 0 {
+				blockCount = 1
+				break
+			}
+		}
+	}
 	w.WriteInt16(blockCount)
 	writePalettedContainer(w, blockPalette, blockData, blockFileBits, blockEntriesPerSection, true)
 
@@ -174,6 +194,224 @@ func writeSection(w *protocol.PacketWriter, section map[string]interface{}, defa
 		biomePalette = []int32{defaultBiome}
 	}
 	writePalettedContainer(w, biomePalette, biomeData, biomeFileBits, biomeEntriesPerSection, false)
+}
+
+type chunkLightData struct {
+	skyLightMask        []uint64
+	blockLightMask      []uint64
+	emptySkyLightMask   []uint64
+	emptyBlockLightMask []uint64
+	skyLightArrays      [][]byte
+	blockLightArrays    [][]byte
+}
+
+type chunkBlockEntity struct {
+	packedXZ byte
+	y        int16
+	typeID   int32
+	nbt      []byte
+}
+
+func buildLightData(sectionMap map[int]map[string]interface{}, numSections int, hasSkyLight bool) chunkLightData {
+	bitCount := numSections + 2
+	wordCount := (bitCount + 63) / 64
+	light := chunkLightData{
+		skyLightMask:        make([]uint64, wordCount),
+		blockLightMask:      make([]uint64, wordCount),
+		emptySkyLightMask:   make([]uint64, wordCount),
+		emptyBlockLightMask: make([]uint64, wordCount),
+	}
+
+	for i := 0; i < numSections; i++ {
+		bit := i + 1 // section masks include one slot below and above the world
+		section, ok := sectionMap[i]
+
+		if hasSkyLight {
+			if ok {
+				if sky := nbtByteArray(section, "SkyLight", "sky_light"); len(sky) == 2048 {
+					setBit(light.skyLightMask, bit)
+					light.skyLightArrays = append(light.skyLightArrays, sky)
+				} else {
+					setBit(light.emptySkyLightMask, bit)
+				}
+			} else {
+				setBit(light.emptySkyLightMask, bit)
+			}
+		}
+
+		if ok {
+			if block := nbtByteArray(section, "BlockLight", "block_light"); len(block) == 2048 {
+				setBit(light.blockLightMask, bit)
+				light.blockLightArrays = append(light.blockLightArrays, block)
+			} else {
+				setBit(light.emptyBlockLightMask, bit)
+			}
+		} else {
+			setBit(light.emptyBlockLightMask, bit)
+		}
+	}
+
+	if hasSkyLight {
+		setBit(light.emptySkyLightMask, 0)
+		setBit(light.emptySkyLightMask, numSections+1)
+	}
+	setBit(light.emptyBlockLightMask, 0)
+	setBit(light.emptyBlockLightMask, numSections+1)
+
+	return light
+}
+
+func writeBitSet(w *protocol.PacketWriter, bits []uint64) {
+	end := len(bits)
+	for end > 0 && bits[end-1] == 0 {
+		end--
+	}
+	w.WriteVarInt(int32(end))
+	for i := 0; i < end; i++ {
+		w.WriteInt64(int64(bits[i]))
+	}
+}
+
+func writeLightArrays(w *protocol.PacketWriter, arrays [][]byte) {
+	w.WriteVarInt(int32(len(arrays)))
+	for _, arr := range arrays {
+		w.WriteVarInt(int32(len(arr)))
+		w.WriteBytes(arr)
+	}
+}
+
+func setBit(bits []uint64, idx int) {
+	if idx < 0 {
+		return
+	}
+	word := idx / 64
+	if word >= len(bits) {
+		return
+	}
+	bits[word] |= uint64(1) << (idx % 64)
+}
+
+func writeBlockEntities(w *protocol.PacketWriter, nbt map[string]interface{}, chunkX, chunkZ int) {
+	entities := collectBlockEntities(nbt, chunkX, chunkZ)
+	w.WriteVarInt(int32(len(entities)))
+	for _, entity := range entities {
+		w.WriteUint8(entity.packedXZ)
+		w.WriteInt16(entity.y)
+		w.WriteVarInt(entity.typeID)
+		if len(entity.nbt) == 0 {
+			w.WriteUint8(TagEnd)
+			continue
+		}
+		w.WriteBytes(entity.nbt)
+	}
+}
+
+func collectBlockEntities(nbt map[string]interface{}, chunkX, chunkZ int) []chunkBlockEntity {
+	rawEntities, ok := nbt["block_entities"]
+	if !ok {
+		return nil
+	}
+	list, ok := rawEntities.(NBTList)
+	if !ok || len(list.Values) == 0 {
+		return nil
+	}
+
+	entities := make([]chunkBlockEntity, 0, len(list.Values))
+	for _, raw := range list.Values {
+		entity, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		id, ok := entity["id"].(string)
+		if !ok {
+			continue
+		}
+		typeID, ok := GetBlockEntityTypeID(id)
+		if !ok {
+			continue
+		}
+
+		x, okX := nbtInt(entity, "x")
+		y, okY := nbtInt(entity, "y")
+		z, okZ := nbtInt(entity, "z")
+		if !okX || !okY || !okZ {
+			continue
+		}
+
+		localX := x - (chunkX << 4)
+		localZ := z - (chunkZ << 4)
+		if localX < 0 || localX > 15 || localZ < 0 || localZ > 15 {
+			localX = x & 15
+			localZ = z & 15
+		}
+
+		entities = append(entities, chunkBlockEntity{
+			packedXZ: byte(((localX & 0x0F) << 4) | (localZ & 0x0F)),
+			y:        int16(y),
+			typeID:   typeID,
+			nbt:      encodeBlockEntityNBT(entity),
+		})
+	}
+
+	return entities
+}
+
+func encodeBlockEntityNBT(entity map[string]interface{}) []byte {
+	data := make(map[string]interface{}, len(entity))
+	for k, v := range entity {
+		switch k {
+		case "id", "x", "y", "z", "keepPacked":
+			continue
+		default:
+			data[k] = v
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := WriteAnonymousNBT(&buf, data); err != nil {
+		return []byte{TagEnd}
+	}
+	return buf.Bytes()
+}
+
+func nbtByteArray(m map[string]interface{}, keys ...string) []byte {
+	for _, key := range keys {
+		if v, ok := m[key]; ok {
+			if arr, ok := v.([]byte); ok {
+				return arr
+			}
+		}
+	}
+	return nil
+}
+
+func nbtInt(m map[string]interface{}, key string) (int, bool) {
+	v, ok := m[key]
+	if !ok {
+		return 0, false
+	}
+	switch val := v.(type) {
+	case int:
+		return val, true
+	case int8:
+		return int(val), true
+	case int16:
+		return int(val), true
+	case int32:
+		return int(val), true
+	case int64:
+		return int(val), true
+	case byte:
+		return int(val), true
+	case uint16:
+		return int(val), true
+	case uint32:
+		return int(val), true
+	case uint64:
+		return int(val), true
+	}
+	return 0, false
 }
 
 func parseBlockStates(bsMap map[string]interface{}) (palette []int32, bits int, data []int64) {
@@ -318,12 +556,13 @@ func unpackEntries(data []int64, bitsPerEntry int, count int) []int {
 	}
 	entries := make([]int, count)
 	entriesPerLong := 64 / bitsPerEntry
-	mask := int64((1 << bitsPerEntry) - 1)
+	mask := uint64((1 << bitsPerEntry) - 1)
 	idx := 0
 	for _, long := range data {
+		value := uint64(long)
 		for j := 0; j < entriesPerLong && idx < count; j++ {
-			entries[idx] = int(long & mask)
-			long >>= bitsPerEntry
+			entries[idx] = int(value & mask)
+			value >>= bitsPerEntry
 			idx++
 		}
 	}
@@ -334,14 +573,15 @@ func packEntries(entries []int, bitsPerEntry int) []int64 {
 	entriesPerLong := 64 / bitsPerEntry
 	numLongs := (len(entries) + entriesPerLong - 1) / entriesPerLong
 	data := make([]int64, numLongs)
+	mask := uint64((1 << bitsPerEntry) - 1)
 	idx := 0
 	for i := range data {
-		var long int64
+		var value uint64
 		for j := 0; j < entriesPerLong && idx < len(entries); j++ {
-			long |= int64(entries[idx]&((1<<bitsPerEntry)-1)) << (j * bitsPerEntry)
+			value |= (uint64(entries[idx]) & mask) << (j * bitsPerEntry)
 			idx++
 		}
-		data[i] = long
+		data[i] = int64(value)
 	}
 	return data
 }

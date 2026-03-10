@@ -129,7 +129,7 @@ func LoadWorld(worldPath, dimension string) *World {
 			chunk := &Chunk{
 				X:          pos[0],
 				Z:          pos[1],
-				PacketData: BuildChunkPacketData(pos[0], pos[1], adjustedNBT, w.Active.Sections, w.Active.DefaultBiome),
+				PacketData: BuildChunkPacketData(pos[0], pos[1], adjustedNBT, w.Active.Sections, w.Active.DefaultBiome, w.Active.HasSkyLight),
 			}
 			w.Chunks[pos] = chunk
 		}

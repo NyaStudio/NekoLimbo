@@ -36,6 +36,12 @@ type Connection struct {
 	properties      []Property
 }
 
+type knownPack struct {
+	namespace string
+	id        string
+	version   string
+}
+
 func (c *Connection) Handle() {
 	defer c.conn.Close()
 
@@ -276,22 +282,21 @@ func (c *Connection) handleConfiguration() error {
 		switch id {
 		case 0x07: // Known Packs response
 			gotKnownPacks = true
-			packCount, _ := reader.ReadVarInt()
-			if packCount > 0 {
-				// Client matched known packs - send entry keys only
-				c.sendRegistryData(false)
+			packs, err := readKnownPacks(reader)
+			if err != nil {
+				log.Printf("[%s] Failed to parse known packs, sending full registry data: %v", c.username, err)
 			} else {
-				// Cross-version client - send full NBT data
-				log.Printf("[%s] Client has no matching known packs, sending full registry data", c.username)
-				c.sendRegistryData(true)
+				log.Printf("[%s] Known packs from client: %s", c.username, formatKnownPacks(packs))
+				if !hasCorePack(packs, VersionName) {
+					log.Printf("[%s] Known packs mismatch, sending full registry data", c.username)
+				}
 			}
-			// Send Update Tags for all registries
+			c.sendRegistryData(true)
 			c.sendUpdateTags()
-			// Send Finish Configuration
 			c.conn.SendPacket(0x03, func(w *protocol.PacketWriter) {})
 			c.conn.Flush()
 
-		case 0x03: // Acknowledge Finish Configuration
+		case 0x03:
 			if gotKnownPacks {
 				return nil
 			}
@@ -302,29 +307,78 @@ func (c *Connection) handleConfiguration() error {
 	}
 }
 
+func readKnownPacks(reader *protocol.PacketReader) ([]knownPack, error) {
+	count, err := reader.ReadVarInt()
+	if err != nil {
+		return nil, err
+	}
+	packs := make([]knownPack, 0, count)
+	for i := int32(0); i < count; i++ {
+		namespace, err := reader.ReadString()
+		if err != nil {
+			return nil, err
+		}
+		id, err := reader.ReadString()
+		if err != nil {
+			return nil, err
+		}
+		version, err := reader.ReadString()
+		if err != nil {
+			return nil, err
+		}
+		packs = append(packs, knownPack{namespace: namespace, id: id, version: version})
+	}
+	return packs, nil
+}
+
+func hasCorePack(packs []knownPack, version string) bool {
+	for _, pack := range packs {
+		if pack.namespace == "minecraft" && pack.id == "core" && pack.version == version {
+			return true
+		}
+	}
+	return false
+}
+
+func formatKnownPacks(packs []knownPack) string {
+	if len(packs) == 0 {
+		return "(none)"
+	}
+	out := ""
+	for i, pack := range packs {
+		if i > 0 {
+			out += ", "
+		}
+		out += fmt.Sprintf("%s:%s@%s", pack.namespace, pack.id, pack.version)
+		if len(out) > 240 {
+			out += "..."
+			break
+		}
+	}
+	return out
+}
+
 func (c *Connection) sendRegistryData(fullData bool) {
 	if fullData {
-		// Send full NBT data for cross-version clients
 		for _, reg := range world.FullRegistryData {
 			c.conn.SendPacket(0x07, func(w *protocol.PacketWriter) {
 				w.WriteString(reg.ID)
 				w.WriteVarInt(int32(len(reg.Entries)))
 				for _, entry := range reg.Entries {
 					w.WriteString(entry.Name)
-					w.WriteBool(true) // has_data = true
+					w.WriteBool(true)
 					w.WriteBytes(entry.Data)
 				}
 			})
 		}
 	} else {
-		// Send entry keys only (data from known pack)
 		for _, reg := range world.SyncedRegistries {
 			c.conn.SendPacket(0x07, func(w *protocol.PacketWriter) {
 				w.WriteString(reg.ID)
 				w.WriteVarInt(int32(len(reg.Entries)))
 				for _, entry := range reg.Entries {
 					w.WriteString(entry)
-					w.WriteBool(false) // has_data = false
+					w.WriteBool(false)
 				}
 			})
 		}
@@ -454,14 +508,16 @@ func (c *Connection) sendChunks(w *world.World, viewDistance int, centerX, cente
 	c.conn.SendPacket(0x0d, func(pw *protocol.PacketWriter) {})
 
 	count := 0
-	for _, chunk := range w.Chunks {
-		dx := chunk.X - centerX
-		dz := chunk.Z - centerZ
-		if dx < -viewDistance || dx > viewDistance || dz < -viewDistance || dz > viewDistance {
-			continue
+	for z := centerZ - viewDistance; z <= centerZ+viewDistance; z++ {
+		for x := centerX - viewDistance; x <= centerX+viewDistance; x++ {
+			if chunk, ok := w.Chunks[[2]int{x, z}]; ok {
+				c.conn.WritePacket(0x28, chunk.PacketData)
+			} else {
+				emptyChunk := world.BuildChunkPacketData(x, z, map[string]interface{}{}, w.Active.Sections, w.Active.DefaultBiome, w.Active.HasSkyLight)
+				c.conn.WritePacket(0x28, emptyChunk)
+			}
+			count++
 		}
-		c.conn.WritePacket(0x28, chunk.PacketData)
-		count++
 	}
 
 	// Chunk Batch Finished (0x0c)
